@@ -4,17 +4,27 @@ import os
 import numpy as np
 from DGN import DGN
 from ReplayBuffer import ReplayBuffer
-torch.cuda.set_device(0)
+from utils import observation
+import copy
+# torch.cuda.set_device(0)
 
 print("Starting the RL experiment!")
 
 max_cycles = 200
 map_size = 30
 receptive_field = 3
-n_episodes = 5
+n_episodes = 2000
 e_before_train = 1
+e_before_eps_anneal = 5
 batch_size=16
-feature_size = 13 * 13 * 5
+feature_size = 13 * 13 * 3
+GAMMA = 0.97
+eps = 0.2
+
+max_neighbors = 5
+
+# smoothing for updating target model
+tau = 0.9
 
 
 def get_adjacency(positions):
@@ -48,7 +58,7 @@ def get_adjacency(positions):
         if cur_pos is None:
             # print("name", name, "was none in adj")
 
-            while len(rows) < 10 and len(rows) != 10:
+            while len(rows) < max_neighbors and len(rows) != max_neighbors:
                 rows.append(np.zeros(n_agents))
             adjacencies[name] = np.vstack(rows)
             continue
@@ -62,10 +72,10 @@ def get_adjacency(positions):
             if cheby_dist(cur_pos, scnd_pos) <= receptive_field:
                 rows.append(eyes[k])
 
-        if len(rows) > 10:
-            rows = rows[:10]
+        if len(rows) > max_neighbors:
+            rows = rows[:max_neighbors]
 
-        while len(rows) != 10:
+        while len(rows) != max_neighbors:
             rows.append(np.zeros(n_agents))
 
 
@@ -106,24 +116,9 @@ handles = env.agents
 agents = np.array(env.agents)
 original_handles = np.copy(handles)
 
-
 # env = ss.black_death_v2(env)
 
-
-
-
-
-
-# TODO work out the following function: this works out some feature vector for a given agent
-#   flatten may definitely be of use since it mashes all features into a 1d array
-#   then we can get started on incorporating the model!
-def observation(state1,state2):
-    state = []
-    for j in range(20):
-        state.append(np.hstack(((state1[j][0:11,0:11,1]-state1[j][0:11,0:11,5]).flatten(),state2[j][-1:-3:-1])))
-    return state
-
-buffer = ReplayBuffer(buffer_size=200000)
+buffer = ReplayBuffer(buffer_size=5000)
 
 
 red_index = np.arange(0,n_red)
@@ -143,42 +138,63 @@ blue_team = agents[blue_index]
 #   4   | other_team_hp
 
 # model = DQN.load("dqn_policy", device="cpu")
-model = PPO.load("ppo_policy", device="cpu")
-for e in range(n_episodes):
+model = DGN(n_red, feature_size, 512, 21, False)
+model = model.float()
+model_t = DGN(n_red, feature_size, 512, 21, False)
 
+optimizer = torch.optim.Adam(model.parameters())
+
+reward_to_plot = []
+
+print(model)
+blue_model = PPO.load("ppo_policy", device="cpu")
+for e in range(n_episodes):
+    model.train()
     obs = env.reset()
 
     dones = {name : False for name in original_handles}
     positions = {name : None for name in original_handles}
+    adjacencies = get_adjacency(positions)
     cur_rewards = []
+    cur_handles = original_handles.tolist()
+
+    if e > e_before_eps_anneal:
+        eps -= 0.0004
+        if eps < 0.1:
+            eps = 0.1
 
     for k in range(max_cycles):
         action_dict = {}
-        for i, name in enumerate(handles):
-            if dones[name]:
+
+        # print(obs.keys(), len(list(obs.keys())))
+        for i, name in enumerate(cur_handles):
+            if name in dones and dones[name]:
                 # TODO: we may need to fill in dummy values for dead agents?
                 print(f"{name} is dead")
                 action = None
-                handles.remove(name)
+                cur_handles.remove(name)
                 positions[name] = None
 
             else:
                 # since we use minimap mode for our adj, we only want the "normal" observations for our obs
-                cur_obs = obs[name][:,:,[0,1,2,4,5]]
-
-                if name in red_team:
-                    action = model.predict(cur_obs, deterministic=True)[0]
+                if name in blue_team:
+                    action_dict[name] = 0 # env.action_space(name).sample() # blue_model.predict(obs[name][:,:,[0,1,2,4,5]], deterministic=True)[0]
                 else:
-                    action = env.action_space(name).sample()
+                    if np.random.rand() < eps:
+                        action_dict[name] = env.action_space(name).sample()
+                    else:
+                        with torch.no_grad():
+                            action_dict[name] = model(observation(obs[name]), adjacencies[name], 1).argmax(1).item()
 
                 # NOTE: the position information is always in the last two dimensions of the observation!
                 positions[name] = (round(obs[name][0,0,-2] * map_size), round(obs[name][0,0,-1] * map_size))
 
-            if action is not None:
-                action_dict[name] = action
 
         adjacencies = get_adjacency(positions)
+        print(action_dict)
         next_obs, rewards, dones, infos = env.step(action_dict)
+        print(rewards)
+
         if max(list(rewards.values())) > 5:
             for keyy in rewards.keys():
                 if rewards[keyy] > 5:
@@ -189,11 +205,11 @@ for e in range(n_episodes):
                     print(positions[keyy])
                     print(dones[keyy])
 
-        # print(adjacencies['red_26'].shape)
         cur_rewards.append(np.mean(list(rewards.values())))
 
-        if k % 3 == 0:
-            buffer.add(obs, action_dict, rewards, next_obs, dones, adjacencies)
+        if k % 2 == 0:
+            if len(obs) == len(next_obs):
+                buffer.add(obs, action_dict, rewards, next_obs, dones, adjacencies)
 
         obs = next_obs
 
@@ -217,67 +233,91 @@ for e in range(n_episodes):
             cur_s = []
             cur_ns = []
             cur_adj = []
+            cur_r = []
+            cur_a = []
+            cur_d = []
+
             for j, name in enumerate(red_team):
+
                 if name in s.keys():
-                    cur_s.append(s[name][:,:,[0,1,2,4,5]].flatten())
+                    cur_s.append(observation(s[name]))
+                    cur_r.append(r[name])
+                    cur_d.append(d[name])
+                    cur_a.append(a[name] if name in a else 0)
                 else:
                     cur_s.append(np.zeros(feature_size))
+                    cur_r.append(0)
+                    cur_d.append(True)
+                    cur_a.append(0)
 
                 if name in n_s.keys():
-                    cur_ns.append(n_s[name][:,:,[0,1,2,4,5]].flatten())
+                    cur_ns.append(observation(s[name]))
                 else:
                     cur_ns.append(np.zeros(feature_size))
 
                 cur_adj.append(adjacencies[name])
-                # print(adjacencies[name].shape)
+
+
 
             states.append(cur_s)
             new_states.append(cur_ns)
             adj.append(cur_adj)
 
 
+            reward.append(cur_r)
+            actions.append(cur_a)
+            done.append(cur_d)
+
+        optimizer.zero_grad()
+
         # these are of shape (num_agents * batch_size, feature_size)
         states = np.array(states).squeeze()
-
         new_states = np.array(new_states).squeeze()
         adj = np.array(adj).squeeze()
 
-        print("-----\n")
-        print("adj", adj.shape)
-        print("states", states.shape)
+        reward = torch.tensor(reward).squeeze()
+        actions = torch.tensor(actions).long().squeeze()
+        done = torch.tensor(done).int().squeeze()
 
 
-        t_adj = torch.tensor(adj)
-        t_s = torch.tensor(states).double()
+        q_values = model(states, adj)
 
-        print(t_adj.shape)
-        print(t_s.shape)
+        q_values = torch.gather(input=q_values, dim=1, index=actions.unsqueeze(1))
+        t_q_values = reward + (1 - done) * GAMMA * torch.max(model_t(new_states, adj),dim=1)[0]
+
+        loss = torch.nn.functional.mse_loss(q_values.squeeze(), t_q_values.squeeze())
+
+
+        loss.backward()
+        optimizer.step()
+        # print(loss.item())
 
         # NOTE: we broadcast the feature matrix to all of our agents. the number of agents is essentially our batch size
         # we mul: [30,10,30] * [30,30,845]
         # which is [n_agents, adjacency] * [n_agents, feature_matrix]
         # this can probably be applied to our model!
-        print(torch.bmm(t_adj, torch.broadcast_to(t_s, (30, 30, 845))).shape)
+        # print(torch.bmm(t_adj, torch.broadcast_to(t_s, (30, 30, 507))).shape)
+
 
         # NOTE: if we seperately execute this for each agent, it actually works!
         # print("combined", (adjacencies['red_12'] @ states[0]).shape)
 
+        with torch.no_grad():
+            for p, p_t in zip(model.parameters(), model_t.parameters()):
+                p_t.data.mul_(tau)
+                p_t.data.add_((1-tau) * p.data)
 
-        # TODO: input state and adjacency into the model and look whats working from there
-        #       maybe start with an averaging kernel and get attention working after that
+    mean_reward = np.mean(cur_rewards)
+    reward_to_plot.append(mean_reward)
+    print(f"episode {e} mean reward {mean_reward}, buf count {buffer.count()}", flush=True)
 
-        # TODO: grab Q values from model
-        #       and target Q values from target model
-        #       (depending on done we either only have reward, or also have future states
-        #       loss - optim - step
+    if e % 50 == 0:
+        torch.save(model.state_dict(), "model_state.zip")
 
-        # TODO: to update the target model
-        #       NOTE: the target model is of same shape as the normal one
-        #       Update target by grabbing the weights from both: w_t = beta * w_n + (1 - beta) * w_t  (3.1 in paper)
+import matplotlib.pyplot as plt
 
-    print(f"episode {e} mean reward {np.mean(cur_rewards)}")
+plt.plot(reward_to_plot)
+plt.savefig("mean_reward.png")
 
-
-    # TODO: we may want to save our MODEL!
 
 

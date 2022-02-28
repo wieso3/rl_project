@@ -6,28 +6,33 @@ import torch.nn.functional as F
 
 
 class Encoder(nn.Module):
-    def __init__(self, din=32, hidden_dim=128):
+    def __init__(self, input_dim, hidden_dim):
         super(Encoder, self).__init__()
-        self.fc = nn.Linear(din, hidden_dim)
+        self.lin = nn.Linear(input_dim, hidden_dim)
+        self.act = nn.ReLU()
 
     def forward(self, x):
-        embedding = F.relu(self.fc(x))
-        return embedding
+        x = self.act(self.lin(x))
+        return x
 
 
-class AttModel(nn.Module):
+class AttKernel(nn.Module):
     def __init__(self, n_node, din, hidden_dim, dout):
-        super(AttModel, self).__init__()
-        self.fcv = nn.Linear(din, hidden_dim)
-        self.fck = nn.Linear(din, hidden_dim)
-        self.fcq = nn.Linear(din, hidden_dim)
+        super(AttKernel, self).__init__()
+        self.value = nn.Linear(din, hidden_dim)
+        self.key = nn.Linear(din, hidden_dim)
+        self.query = nn.Linear(din, hidden_dim)
         self.fcout = nn.Linear(hidden_dim, dout)
 
     def forward(self, x, mask):
-        v = F.relu(self.fcv(x))
-        q = F.relu(self.fcq(x))
-        k = F.relu(self.fck(x)).permute(0, 2, 1)
-        att = F.softmax(torch.mul(torch.bmm(q, k), mask) - 9e15 * (1 - mask), dim=2)
+        v = F.relu(self.value(x))
+        k = F.relu(self.key(x)) # .permute(0, 2, 1)
+        q = F.relu(self.query(x))
+
+
+        tmp = torch.bmm(q, k)
+        print("tmp", tmp.shape)
+        att = F.softmax(torch.mul(tmp, mask) - 9e15 * (1 - mask), dim=2)
 
         out = torch.bmm(att, v)
         # out = torch.add(out,v)
@@ -45,18 +50,55 @@ class QNet(nn.Module):
         return q
 
 
+class MeanKernel(nn.Module):
+    def __init__(self, hidden_dim, n_agents):
+        super(MeanKernel, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.n_agents = n_agents
+
+    def forward(self, x, mask, n_agents=None):
+        n_agents = n_agents if n_agents else self.n_agents
+
+        feature_broadcast = torch.broadcast_to(x, (n_agents, self.n_agents, self.hidden_dim))
+        x_feats = torch.bmm(mask, feature_broadcast)
+        # print("x_feats", x_feats.shape)
+
+        x_mean = torch.mean(x_feats, dim=1)
+        # print("x_mean", x_mean.shape)
+
+
+        return x_mean
+
+
 class DGN(nn.Module):
-    def __init__(self, n_agent, num_inputs, hidden_dim, num_actions):
+    def __init__(self, n_agents, input_dim, hidden_dim, n_actions, use_att=True):
         super(DGN, self).__init__()
 
-        self.encoder = Encoder(num_inputs, hidden_dim)
-        self.att_1 = AttModel(n_agent, hidden_dim, hidden_dim, hidden_dim)
-        self.att_2 = AttModel(n_agent, hidden_dim, hidden_dim, hidden_dim)
-        self.q_net = QNet(hidden_dim, num_actions)
+        self.encoder = Encoder(input_dim, hidden_dim)
 
-    def forward(self, x, mask):
-        h1 = self.encoder(x)
-        h2 = self.att_1(h1, mask)
-        h3 = self.att_2(h2, mask)
+        if use_att:
+            self.att_1 = AttKernel(n_agents, hidden_dim, n_actions)
+            self.att_2 = AttKernel(n_agents, hidden_dim, n_actions)
+        else:
+            self.att_1 = MeanKernel(hidden_dim, n_agents)
+            self.att_2 = MeanKernel(hidden_dim, n_agents)
+
+        self.q_net = QNet(hidden_dim, n_actions)
+
+    def forward(self, x, mask, n_agents=None):
+
+        x = torch.tensor(x).float()
+        mask = torch.tensor(mask).float()
+
+        # print("x", x.shape, "mask", mask.shape)
+        x_enc = self.encoder(x)
+
+        if n_agents == 1:
+            x_enc = x_enc.unsqueeze(0)
+            mask = mask.unsqueeze(0)
+
+        # print("x_enc", x_enc.shape)
+        h2 = self.att_1(x_enc, mask, n_agents)
+        h3 = self.att_2(h2, mask, n_agents)
         q = self.q_net(h3)
         return q
