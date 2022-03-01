@@ -8,7 +8,7 @@
 #SBATCH --partition=cpu_normal_stud  # Partition auf der gerechnet werden soll (Bei GPU Jobs unbedingt notwendig)
 #SBATCH --cpus-per-task=4              # Reservierung von 4 Threads
 #SBATCH --mem=10G                       # Reservierung von 10 GB RAM Speicher pro Knoten
-#SBATCH --gres=gpu:1                   # Reservierung von einer GPU. Es kann ein bestimmter Typ angefordert werden:
+                   # Reservierung von einer GPU. Es kann ein bestimmter Typ angefordert werden:
                                        #SBATCH --gres=gpu:pascal:1
 
 echo "Script starts..."

@@ -1,7 +1,6 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 
@@ -17,27 +16,28 @@ class Encoder(nn.Module):
 
 
 class AttKernel(nn.Module):
-    def __init__(self, n_node, din, hidden_dim, dout):
+
+    def __init__(self, n_agents, n_heads, hidden_dim):
         super(AttKernel, self).__init__()
-        self.value = nn.Linear(din, hidden_dim)
-        self.key = nn.Linear(din, hidden_dim)
-        self.query = nn.Linear(din, hidden_dim)
-        self.fcout = nn.Linear(hidden_dim, dout)
+        self.n_agents = n_agents
+        self.hidden_dim = hidden_dim
+        self.att_1 = nn.MultiheadAttention(hidden_dim, n_heads, batch_first=True)
+        self.att_2 = nn.MultiheadAttention(hidden_dim, n_heads, batch_first=True)
 
-    def forward(self, x, mask):
-        v = F.relu(self.value(x))
-        k = F.relu(self.key(x)) # .permute(0, 2, 1)
-        q = F.relu(self.query(x))
+    def forward(self, x, mask, n_agents=None):
 
+        n_agents = n_agents if n_agents else self.n_agents
 
-        tmp = torch.bmm(q, k)
-        print("tmp", tmp.shape)
-        att = F.softmax(torch.mul(tmp, mask) - 9e15 * (1 - mask), dim=2)
+        feature_broadcast = torch.broadcast_to(x, (n_agents, self.n_agents, self.hidden_dim))
+        x_feats = torch.bmm(mask, feature_broadcast)
 
-        out = torch.bmm(att, v)
-        # out = torch.add(out,v)
-        out = F.relu(self.fcout(out))
-        return out
+        if len(x.shape) < 3:
+            x = x.unsqueeze(1)
+
+        x_feats, _ = self.att_1(x, x_feats, x_feats)
+        x_feats, attn_weights = self.att_2(x, x_feats, x_feats)
+
+        return x_feats.squeeze(1)
 
 
 class QNet(nn.Module):
@@ -61,11 +61,7 @@ class MeanKernel(nn.Module):
 
         feature_broadcast = torch.broadcast_to(x, (n_agents, self.n_agents, self.hidden_dim))
         x_feats = torch.bmm(mask, feature_broadcast)
-        # print("x_feats", x_feats.shape)
-
         x_mean = torch.mean(x_feats, dim=1)
-        # print("x_mean", x_mean.shape)
-
 
         return x_mean
 
@@ -77,8 +73,7 @@ class DGN(nn.Module):
         self.encoder = Encoder(input_dim, hidden_dim)
 
         if use_att:
-            self.att_1 = AttKernel(n_agents, hidden_dim, n_actions)
-            self.att_2 = AttKernel(n_agents, hidden_dim, n_actions)
+            self.att_1 = AttKernel(n_agents, 4, hidden_dim)
         else:
             self.att_1 = MeanKernel(hidden_dim, n_agents)
             self.att_2 = MeanKernel(hidden_dim, n_agents)
@@ -89,16 +84,15 @@ class DGN(nn.Module):
 
         x = torch.tensor(x).float()
         mask = torch.tensor(mask).float()
-
-        # print("x", x.shape, "mask", mask.shape)
         x_enc = self.encoder(x)
 
         if n_agents == 1:
             x_enc = x_enc.unsqueeze(0)
             mask = mask.unsqueeze(0)
+        else:
+            x_enc = x_enc.unsqueeze(1)
 
-        # print("x_enc", x_enc.shape)
         h2 = self.att_1(x_enc, mask, n_agents)
-        h3 = self.att_2(h2, mask, n_agents)
-        q = self.q_net(h3)
+        q = self.q_net(h2)
+
         return q

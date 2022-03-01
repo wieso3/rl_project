@@ -1,5 +1,5 @@
 import torch
-from pettingzoo.magent import battle_v3, battlefield_v3
+from pettingzoo.magent import gather_v4
 import os
 import numpy as np
 from DGN import DGN
@@ -8,41 +8,28 @@ from utils import observation, plot_rewards, load_torch_model
 import copy
 import matplotlib.pyplot as plt
 import pickle
-from stable_baselines3 import PPO
-
 # torch.cuda.set_device(0)
 
 
 
 print("Starting the RL experiment!")
 
-def get_adjacency(positions, only_red=True):
-    """
-    Construct the adjacency matrices for a set of given positions. Note that all agents will have a position. If their
-    position is None, then their adjacency will reflect them only having access to their OWN feature values.
+def get_adjacency(positions):
 
-    For a given agent, their adjacency is of shape (max_neighbors + 1, n_agents). The first row contains the
-    index of the original agent. The following (#max_neighbors) rows contain indices of agents that this agent is
-    connected to. Only agents within the same team will be connected with each other! If there aren't enough neighbors,
-    we pad with zeros.
+    # N is number of agents
+    # each agent needs an adjacency matrix of size (neighbors+1 x N)
+    # first row is the one hot of our current agent
+    # rows j=2,..,n_neighbors are one-hot of the neighbor
 
-    Two agents are considered connected, if the Chebyshev-Distance of their positions is <= receptive_field.
+    # feature matrix is of size (N x L) with L as length of feature vector
 
-    We can use these adjacencies to multiply with the feature matrix of shape (n_agents, feature_size) to get all
-    features of neighbors of shape (max_neighbors + 1, feature_size).
 
-    Args:
-        positions: dictionary containing positions for every agent. These are None for dead agents and a tuple (int,int)
-                   otherwise.
-        only_red: whether we currently construct adjacencies for the red team (i.e. the one we train with).
-                  Default: True
-    Returns:
-        adjacencies: dictionary containing adjacencies of shape (max_neighbors + 1, n_agents) for each agent in the
-                     desired team
-    """
+    # for each agent i: adjacency_i x feature_matrix = feature vectors in the local region
 
-    team = red_team if only_red else blue_team
 
+    team = original_handles
+
+    # n_agents = len(original_handles)
     n_agents = len(team)
 
     adjacencies = {}
@@ -58,6 +45,7 @@ def get_adjacency(positions, only_red=True):
         rows = [eyes[i]]
 
         if cur_pos is None:
+            # print("name", name, "was none in adj")
 
             while len(rows) < max_neighbors and len(rows) != max_neighbors:
                 rows.append(np.zeros(n_agents))
@@ -79,11 +67,16 @@ def get_adjacency(positions, only_red=True):
         while len(rows) != max_neighbors:
             rows.append(np.zeros(n_agents))
 
+
+
         adjacencies[name] = np.vstack(rows)
 
     return adjacencies
 
 
+
+
+from stable_baselines3 import PPO, DQN
 import supersuit as ss
 
 # env = battle_v3.parallel_env(map_size=map_size, minimap_mode=False, step_reward=-0.005,
@@ -120,16 +113,7 @@ import supersuit as ss
 
 
 def train_model(model, model_t, enemy_model):
-    """
-    Train a model using a target model. The enemies get simulated by a stable-baselines enemy_model.
 
-    Args:
-        model: the model to use for predictions and training
-        model_t: the target model to use for smoother training purposes
-        enemy_model: stable-baselines model that simulates the agents that we do not train
-    Returns:
-        rewards: list of mean rewards per episode
-    """
     buffer = ReplayBuffer(buffer_size=7500)
     global exploration_eps
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -147,16 +131,16 @@ def train_model(model, model_t, enemy_model):
         dones = {name : False for name in original_handles}
         positions = {name : None for name in original_handles}
         adjacencies = get_adjacency(positions)
-        # blue_adjacencies = get_adjacency(positions, only_red=False)
 
 
         cur_rewards = []
         cur_handles = original_handles.tolist()
 
         if e > e_before_eps_anneal:
-            exploration_eps *= eps_anneal_factor
+            exploration_eps *= 0.994
             exploration_eps = max(0.1, exploration_eps)
 
+        print("eps", exploration_eps)
 
         for k in range(max_cycles):
             action_dict = {}
@@ -173,16 +157,11 @@ def train_model(model, model_t, enemy_model):
                     positions[name] = None
 
                 else:
-                    # since we use minimap mode for our adj, we only want the "normal" observations for our obs
-                    if name in blue_team:
-                        action_dict[name] = enemy_model.predict(obs[name][:,:,[0,1,2,4,5]], deterministic=True)[0]
-                        # # blue_model(observation(obs[name]), blue_adjacencies[name], 1).argmax(1).item()  # 0 #env.action_space(name).sample() #
+                    if True or  np.random.rand() < exploration_eps:
+                        action_dict[name] = env.action_space(name).sample()
                     else:
-                        if np.random.rand() < exploration_eps:
-                            action_dict[name] = env.action_space(name).sample()
-                        else:
-                            with torch.no_grad():
-                                action_dict[name] = model(observation(obs[name]), adjacencies[name], 1).argmax(1).item()
+                        with torch.no_grad():
+                            action_dict[name] = model(observation(obs[name]), adjacencies[name], 1).argmax(1).item()
 
                     # NOTE: the position information is always in the last two dimensions of the observation!
 
@@ -195,18 +174,13 @@ def train_model(model, model_t, enemy_model):
             # blue_adjacencies = get_adjacency(positions, only_red=False)
             next_obs, rewards, dones, infos = env.step(action_dict)
 
-            n_red_rewards = 0
-            red_rewards = 0
-            for name in red_team:
-                if name in rewards:
-                    n_red_rewards += 1
-                    red_rewards += rewards[name]
 
-            cur_rewards.append(red_rewards / n_red_rewards)
+
+            cur_rewards.append(np.mean(list(rewards.values())))
 
 
             buf_dict = {}
-            for name in red_team:
+            for name in original_handles:
                 to_append = []
                 if name in obs:
                     # TODO: check if dead reds need to be checked for any further!
@@ -251,7 +225,7 @@ def train_model(model, model_t, enemy_model):
                 cur_a = []
                 cur_d = []
 
-                for j, name in enumerate(red_team):
+                for j, name in enumerate(original_handles):
                     o, a, r, n_o, d, adj_m = buf_dict[name]
                     cur_s.append(o)
                     cur_ns.append(n_o)
@@ -299,16 +273,16 @@ def train_model(model, model_t, enemy_model):
 
         mean_reward = np.mean(cur_rewards)
         reward_to_plot.append(mean_reward)
-        print(f"episode {e} mean reward {mean_reward}, buf count {buffer.count()}, eps {exploration_eps}", flush=True)
+        print(f"episode {e} mean reward {mean_reward}, buf count {buffer.count()}", flush=True)
 
-        if e % 50 == 0:
+        if e % 20 == 0:
             with torch.no_grad():
                 for p, p_t in zip(model.parameters(), model_t.parameters()):
                     p_t.data.mul_(0)
                     p_t.data.add_(1 * p.data)
 
 
-        if e % 100 == 0:
+        if e % 10 == 0:
             torch.save(model.state_dict(), "model_state.zip")
             plt.clf()
             plt.plot(reward_to_plot)
@@ -318,9 +292,26 @@ def train_model(model, model_t, enemy_model):
             plt.plot(losses)
             plt.savefig("loss/loss_" + run_name + ".png")
 
-    buffer.erase()
-
     return reward_to_plot
+
+run_name = "att_0_512"
+use_att = True
+emb_dim=256
+max_cycles = 150
+map_size = 30
+receptive_field = 7
+n_episodes = 102
+e_before_train = 5
+e_before_eps_anneal = 5
+batch_size=16
+feature_size = 15 * 15 * 3
+GAMMA = 0.9
+lr = 0.0002
+exploration_eps = 0.9
+max_neighbors = 4
+# smoothing for updating target model
+tau = 0.95
+n_actions = 33
 
 
 all_rewards = []
@@ -328,28 +319,12 @@ all_rewards = []
 seeds = [1] # [1,2,3,4,5] # 1
 
 for seed in seeds:
-    use_att = True
-    emb_dim = 256
-    max_cycles = 150
-    map_size = 30
-    receptive_field = 6
-    n_episodes = 1201
-    e_before_train = 200
-    e_before_eps_anneal = 150
-    batch_size = 16
-    feature_size = 13 * 13 * 3
-    GAMMA = 0.9
-    lr = 0.0002
-    exploration_eps = 0.9
-    eps_anneal_factor = 0.994
-    max_neighbors = 5
-    # smoothing for updating target model
-    tau = 0.95
-    n_actions = 21
     run_name = str(seed)
 
-    env = battle_v3.parallel_env(map_size=map_size, minimap_mode=True, max_cycles=max_cycles, extra_features=False,
-                                 attack_opponent_reward=5, dead_penalty=-2, attack_penalty=-0.01)
+    env = gather_v4.parallel_env(minimap_mode=True, step_reward=-0.01, attack_penalty=-0.1,
+                  dead_penalty=-1, attack_food_reward=0.5, max_cycles=max_cycles, extra_features=False)
+
+
 
 
     env.seed(seed)
@@ -357,19 +332,13 @@ for seed in seeds:
     torch.manual_seed(seed)
 
     obs = env.reset()
-    n_red, n_blue = env.team_sizes
     handles = env.agents
     agents = np.array(env.agents)
     original_handles = np.copy(handles)
-    red_index = np.arange(0, n_red)
-    blue_index = np.arange(n_red, n_red + n_blue)
 
-    red_team = agents[red_index]
-    blue_team = agents[blue_index]
-
-    model = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+    model = DGN(len(agents), feature_size, emb_dim, n_actions, use_att=use_att)
     model = model.float()
-    model_t = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+    model_t = DGN(len(agents), feature_size, emb_dim, n_actions, use_att=use_att)
 
     blue_model = PPO.load("ppo_policy", device="cpu")
     # blue_model = load_torch_model(DGN(n_red, feature_size, emb_dim, 21, use_att=use_att), "model_state_1.zip")
