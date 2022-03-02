@@ -16,4 +16,4 @@ working_dir=/home/kruse/Schreibtisch/rl/rl_project
 echo $working_dir
 cd $working_dir
 
-srun ~/anaconda3/tmp/envs/rl/bin/python main.py
+srun ~/anaconda3/tmp/envs/rl/bin/python battle.py -env=battlefield

@@ -1,35 +1,36 @@
 import torch
 from pettingzoo.magent import gather_v4
-import os
+import argparse
 import numpy as np
-from DGN import DGN
-from ReplayBuffer import ReplayBuffer
-from utils import observation, plot_rewards, load_torch_model
-import copy
+from models.DGN import DGN
+from utils import ReplayBuffer, observation, load_torch_model
 import matplotlib.pyplot as plt
 import pickle
 # torch.cuda.set_device(0)
 
 
-
-print("Starting the RL experiment!")
-
 def get_adjacency(positions):
+    """
+    Construct the adjacency matrices for a set of given positions. Note that all agents will have a position. If their
+    position is None, then their adjacency will reflect them only having access to their OWN feature values.
 
-    # N is number of agents
-    # each agent needs an adjacency matrix of size (neighbors+1 x N)
-    # first row is the one hot of our current agent
-    # rows j=2,..,n_neighbors are one-hot of the neighbor
+    For a given agent, their adjacency is of shape (max_neighbors + 1, n_agents). The first row contains the
+    index of the original agent. The following (#max_neighbors) rows contain indices of agents that this agent is
+    connected to. If there aren't enough neighbors, we pad with zeros.
 
-    # feature matrix is of size (N x L) with L as length of feature vector
+    Two agents are considered connected, if the Chebyshev-Distance of their positions is <= receptive_field.
 
+    We can use these adjacencies to multiply with the feature matrix of shape (n_agents, feature_size) to get all
+    features of neighbors of shape (max_neighbors + 1, feature_size).
 
-    # for each agent i: adjacency_i x feature_matrix = feature vectors in the local region
-
+    Args:
+        positions: dictionary containing positions for every agent. These are None for dead agents and a tuple (int,int)
+                   otherwise.
+    Returns:
+        adjacencies: dictionary containing adjacencies of shape (max_neighbors + 1, n_agents) for each agent
+    """
 
     team = original_handles
-
-    # n_agents = len(original_handles)
     n_agents = len(team)
 
     adjacencies = {}
@@ -45,7 +46,6 @@ def get_adjacency(positions):
         rows = [eyes[i]]
 
         if cur_pos is None:
-            # print("name", name, "was none in adj")
 
             while len(rows) < max_neighbors and len(rows) != max_neighbors:
                 rows.append(np.zeros(n_agents))
@@ -67,53 +67,75 @@ def get_adjacency(positions):
         while len(rows) != max_neighbors:
             rows.append(np.zeros(n_agents))
 
-
-
         adjacencies[name] = np.vstack(rows)
 
     return adjacencies
 
 
+def show_match(model):
+    """
+    Execute a show match for one episode and rendering it.
+
+    Args:
+        model: the model to use for the omnivores
+    Returns:
+        Nothing, but renders the episode being played
+    """
+    model.eval()
+    dones = {name: False for name in original_handles}
+    positions = {name: None for name in original_handles}
+    adjacencies = get_adjacency(positions)
+    cur_handles = original_handles.tolist()
+    cur_rewards = []
+
+    for k in range(max_cycles):
+        action_dict = {}
+        if len(env.agents) <= 1:
+            # this is an emergency break, because segmentation faults occur when all agents are done
+            break
+
+        for i, name in enumerate(cur_handles):
+            # handling dead agents
+            if (name in dones and dones[name]) or name not in obs:
+                cur_handles.remove(name)
+                positions[name] = None
+
+            else:
+                # since we use minimap mode for our adj, we only want the "normal" observations for our obs
+
+                if np.random.rand() < 0.1:
+                    action_dict[name] = env.action_space(name).sample()
+                else:
+                    with torch.no_grad():
+                        action_dict[name] = model(observation(obs[name]), adjacencies[name], 1).argmax(1).item()
+
+                if name in obs:
+                    positions[name] = (round(obs[name][0, 0, -2] * map_size), round(obs[name][0, 0, -1] * map_size))
+                else:
+                    positions[name] = None
 
 
-from stable_baselines3 import PPO, DQN
-import supersuit as ss
+        adjacencies = get_adjacency(positions)
+        next_obs, rewards, dones, infos = env.step(action_dict)
+        env.render()
 
-# env = battle_v3.parallel_env(map_size=map_size, minimap_mode=False, step_reward=-0.005,
-#     dead_penalty=-0.1, attack_penalty=-0.1, attack_opponent_reward=0.2,
-#     max_cycles=max_cycles, extra_features=False)
-# env = ss.black_death_v2(env)
-# env = ss.pettingzoo_env_to_vec_env_v1(env)
-# env = ss.concat_vec_envs_v1(env, 12, 1, base_class='stable_baselines3')
-#
-#
-# from stable_baselines3.dqn import MlpPolicy
-# model = DQN(MlpPolicy, env, learning_starts=1000, verbose=2)
-# model.learn(total_timesteps=max_cycles)
-# model.save("dqn_policy")
+        cur_rewards.append(np.mean(list(rewards.values())))
 
-# from stable_baselines3.ppo import MlpPolicy
-# model = PPO(MlpPolicy, env, verbose=3, gamma=0.95, n_steps=256, ent_coef=0.0905168, learning_rate=0.00062211, vf_coef=0.042202, max_grad_norm=0.9, gae_lambda=0.99, n_epochs=5, clip_range=0.3, batch_size=256)
-# model.learn(total_timesteps=max_cycles)
-# model.save("ppo_policy")
+    print(np.mean(cur_rewards))
 
 
 
+def train_model(model, model_t):
+    """
+    Train a model using a target model. The enemies get simulated by a stable-baselines enemy_model.
 
-# obs channels (battle):
-# index | obs channel content
-# ---------------------------
-#   0   | obstacle/off the map
-#   1   | my_team_presence
-#   2   | my_team_hp
-#   3   | other_team_presence
-#   4   | other_team_hp
-
-# model = DQN.load("dqn_policy", device="cpu")
-
-
-def train_model(model, model_t, enemy_model):
-
+    Args:
+        model: the model to use for predictions and training
+        model_t: the target model to use for smoother training purposes
+        enemy_model: stable-baselines model that simulates the agents that we do not train
+    Returns:
+        rewards: list of mean rewards per episode
+    """
     buffer = ReplayBuffer(buffer_size=7500)
     global exploration_eps
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -131,16 +153,13 @@ def train_model(model, model_t, enemy_model):
         dones = {name : False for name in original_handles}
         positions = {name : None for name in original_handles}
         adjacencies = get_adjacency(positions)
-
-
         cur_rewards = []
         cur_handles = original_handles.tolist()
 
         if e > e_before_eps_anneal:
-            exploration_eps *= 0.994
+            exploration_eps *= eps_anneal_factor
             exploration_eps = max(0.1, exploration_eps)
 
-        print("eps", exploration_eps)
 
         for k in range(max_cycles):
             action_dict = {}
@@ -149,41 +168,34 @@ def train_model(model, model_t, enemy_model):
                 break
 
             for i, name in enumerate(cur_handles):
+                # handling dead agents
                 if (name in dones and dones[name]) or name not in obs:
-                    # TODO: we may need to fill in dummy values for dead agents?
-                    # print(f"{name} is dead")
-                    # action_dict[name] = None
                     cur_handles.remove(name)
                     positions[name] = None
 
                 else:
-                    if True or  np.random.rand() < exploration_eps:
+                    # since we use minimap mode for our adj, we only want the "normal" observations for our obs
+                    if np.random.rand() < exploration_eps:
                         action_dict[name] = env.action_space(name).sample()
                     else:
                         with torch.no_grad():
                             action_dict[name] = model(observation(obs[name]), adjacencies[name], 1).argmax(1).item()
 
                     # NOTE: the position information is always in the last two dimensions of the observation!
-
                     if name in obs:
                         positions[name] = (round(obs[name][0,0,-2] * map_size), round(obs[name][0,0,-1] * map_size))
                     else:
                         positions[name] = None
 
             adjacencies = get_adjacency(positions)
-            # blue_adjacencies = get_adjacency(positions, only_red=False)
             next_obs, rewards, dones, infos = env.step(action_dict)
 
-
-
             cur_rewards.append(np.mean(list(rewards.values())))
-
 
             buf_dict = {}
             for name in original_handles:
                 to_append = []
                 if name in obs:
-                    # TODO: check if dead reds need to be checked for any further!
                     to_append.append(observation(obs[name]))
                     to_append.append(action_dict[name] if name in action_dict else 0)
                     to_append.append(rewards[name] if name in rewards else 0)
@@ -201,9 +213,6 @@ def train_model(model, model_t, enemy_model):
             buffer.add(buf_dict)
 
             obs = next_obs
-
-
-            # env.render()
 
             if e < e_before_train:
                 continue
@@ -253,9 +262,6 @@ def train_model(model, model_t, enemy_model):
             actions = torch.tensor(np.concatenate(actions, axis=0)).long()
             done = torch.tensor(np.concatenate(done, axis=0)).long()
 
-            # print("states", states.shape, "new_states", new_states.shape)
-            # print("adj", adj.shape)
-            # print("reward", reward.shape, "actions", actions.shape, "dones", done.shape)
 
             q_values = model(states, adj, n_agents=states.shape[0])
 
@@ -273,59 +279,93 @@ def train_model(model, model_t, enemy_model):
 
         mean_reward = np.mean(cur_rewards)
         reward_to_plot.append(mean_reward)
-        print(f"episode {e} mean reward {mean_reward}, buf count {buffer.count()}", flush=True)
+        print(f"episode {e} mean reward {mean_reward}, buf count {buffer.count()}, eps {exploration_eps}", flush=True)
 
-        if e % 20 == 0:
+        # after 50 episodes, update the target model
+        if e % 50 == 0:
             with torch.no_grad():
                 for p, p_t in zip(model.parameters(), model_t.parameters()):
                     p_t.data.mul_(0)
                     p_t.data.add_(1 * p.data)
 
 
-        if e % 10 == 0:
-            torch.save(model.state_dict(), "model_state.zip")
-            plt.clf()
-            plt.plot(reward_to_plot)
-            plt.savefig("mean_rewards_" + run_name + ".png")
+    print("Saving the model to model/" + env_name + "model_state.zip.")
+    torch.save(model.state_dict(), "models/" + env_name + "model_state.zip")
+    print("Plotting rewards and losses!")
+    plt.clf()
+    plt.plot(reward_to_plot)
+    plt.savefig("mean_rewards_" + run_name + ".png")
 
-            plt.clf()
-            plt.plot(losses)
-            plt.savefig("loss/loss_" + run_name + ".png")
+    plt.clf()
+    plt.plot(losses)
+    plt.savefig("loss/loss_" + run_name + ".png")
+
+    buffer.erase()
 
     return reward_to_plot
 
-run_name = "att_0_512"
-use_att = True
-emb_dim=256
-max_cycles = 150
-map_size = 30
-receptive_field = 7
-n_episodes = 102
-e_before_train = 5
-e_before_eps_anneal = 5
-batch_size=16
-feature_size = 15 * 15 * 3
-GAMMA = 0.9
-lr = 0.0002
-exploration_eps = 0.9
-max_neighbors = 4
-# smoothing for updating target model
-tau = 0.95
-n_actions = 33
+
+# obs channels (gather):
+# index | obs channel content
+# ---------------------------
+#   0   | obstacle/off the map
+#   1   | omnivore_presence
+#   2   | omnivore_hp
+#   3   | food_presence
+#   4   | food_hp
 
 
-all_rewards = []
+if __name__ == '__main__':
 
-seeds = [1] # [1,2,3,4,5] # 1
+    from config import gather_config
 
-for seed in seeds:
-    run_name = str(seed)
+    parser = argparse.ArgumentParser(description="Execute or train a model on one of the battle MAgent environments" + \
+                                     " Hyperparameters are provided via the config.py file!.")
+    parser.add_argument('-show', dest='show', action='store_const',
+                    const=True, default=False,help='If True, execute a show match (with rendering activated).')
+    parser.add_argument("-seed", metavar="S", type=int, help="Seed for the current experiment. Default: 1",
+                        default=1)
 
-    env = gather_v4.parallel_env(minimap_mode=True, step_reward=-0.01, attack_penalty=-0.1,
-                  dead_penalty=-1, attack_food_reward=0.5, max_cycles=max_cycles, extra_features=False)
+    args = parser.parse_args()
+
+    print("Starting the RL experiment!")
+
+    env_name = "gather"
+
+    config = gather_config
+    max_cycles = config['max_cycles']
+    env = gather_v4.parallel_env(minimap_mode=True, max_cycles=max_cycles, extra_features=False,
+                                 dead_penalty=-2, attack_penalty=-0.01)
+
+    all_rewards = []
+
+    # seeds = [1,2,3,4,5] # 1
 
 
+    print(f"Running the enviroment {env_name}.")
+    print("Hyperparams follow:")
+    print(config)
 
+    seed = args.seed
+
+    map_size = 200
+    use_att = config["use_att"]
+    emb_dim = config["emb_dim"]
+    receptive_field = config["receptive_field"]
+    max_neighbors = config["max_neighbors"]
+    n_actions = config["n_actions"]
+
+    n_episodes = config["n_episodes"]
+    e_before_train = config["e_before_train"]
+    e_before_eps_anneal = config["e_before_eps_anneal"]
+    exploration_eps = config["exploration_eps"]
+    eps_anneal_factor = config["eps_anneal_factor"]
+    batch_size = config["batch_size"]
+    feature_size = config["feature_size"]
+    GAMMA = config["GAMMA"]
+    lr = config["lr"]
+
+    run_name = env_name + "_" + str(seed)
 
     env.seed(seed)
     np.random.seed(seed)
@@ -335,21 +375,22 @@ for seed in seeds:
     handles = env.agents
     agents = np.array(env.agents)
     original_handles = np.copy(handles)
+    n_agents = len(agents)
 
-    model = DGN(len(agents), feature_size, emb_dim, n_actions, use_att=use_att)
+    if args.show:
+        print("With show being True, we will execute one show match!")
+        model = DGN(n_agents, feature_size, emb_dim, n_actions, use_att=use_att)
+        model = load_torch_model(model, "models/" + env_name + "_model_state.zip")
+        show_match(model)
+        exit()
+
+
+    model = DGN(n_agents, feature_size, emb_dim, n_actions, use_att=use_att)
     model = model.float()
-    model_t = DGN(len(agents), feature_size, emb_dim, n_actions, use_att=use_att)
+    model_t = DGN(n_agents, feature_size, emb_dim, n_actions, use_att=use_att)
 
-    blue_model = PPO.load("ppo_policy", device="cpu")
-    # blue_model = load_torch_model(DGN(n_red, feature_size, emb_dim, 21, use_att=use_att), "model_state_1.zip")
-    rewards = train_model(model, model_t, blue_model)
+    rewards = train_model(model, model_t)
 
 
     with open("rewards/" + run_name, 'wb') as fp:
         pickle.dump(rewards, fp)
-
-
-# all_rewards.append(rewards)
-
-
-# plot_rewards(all_rewards, "tmp")

@@ -1,20 +1,14 @@
 import torch
 from pettingzoo.magent import battle_v3, battlefield_v3
-import os
 import numpy as np
-from DGN import DGN
-from ReplayBuffer import ReplayBuffer
-from utils import observation, plot_rewards, load_torch_model
-import copy
+from models.DGN import DGN
+from utils import ReplayBuffer, observation, plot_rewards, load_torch_model
 import matplotlib.pyplot as plt
 import pickle
 from stable_baselines3 import PPO
+import argparse
 
 # torch.cuda.set_device(0)
-
-
-
-print("Starting the RL experiment!")
 
 def get_adjacency(positions, only_red=True):
     """
@@ -84,40 +78,66 @@ def get_adjacency(positions, only_red=True):
     return adjacencies
 
 
-import supersuit as ss
+def show_match(model, model_enemy):
+    """
+    Execute a show match for one episode and rendering it.
 
-# env = battle_v3.parallel_env(map_size=map_size, minimap_mode=False, step_reward=-0.005,
-#     dead_penalty=-0.1, attack_penalty=-0.1, attack_opponent_reward=0.2,
-#     max_cycles=max_cycles, extra_features=False)
-# env = ss.black_death_v2(env)
-# env = ss.pettingzoo_env_to_vec_env_v1(env)
-# env = ss.concat_vec_envs_v1(env, 12, 1, base_class='stable_baselines3')
-#
-#
-# from stable_baselines3.dqn import MlpPolicy
-# model = DQN(MlpPolicy, env, learning_starts=1000, verbose=2)
-# model.learn(total_timesteps=max_cycles)
-# model.save("dqn_policy")
+    Args:
+        model: the model to use for one team
+        model_enemy: the model to use for the enemy team
+    Returns:
+        Nothing, but renders the episode being played
+    """
+    model.eval()
+    dones = {name: False for name in original_handles}
+    positions = {name: None for name in original_handles}
+    adjacencies = get_adjacency(positions)
+    cur_handles = original_handles.tolist()
+    cur_rewards = []
 
-# from stable_baselines3.ppo import MlpPolicy
-# model = PPO(MlpPolicy, env, verbose=3, gamma=0.95, n_steps=256, ent_coef=0.0905168, learning_rate=0.00062211, vf_coef=0.042202, max_grad_norm=0.9, gae_lambda=0.99, n_epochs=5, clip_range=0.3, batch_size=256)
-# model.learn(total_timesteps=max_cycles)
-# model.save("ppo_policy")
+    for k in range(max_cycles):
+        action_dict = {}
+        if len(env.agents) <= 1:
+            # this is an emergency break, because segmentation faults occur when all agents are done
+            break
+
+        for i, name in enumerate(cur_handles):
+            # handling dead agents
+            if (name in dones and dones[name]) or name not in obs:
+                cur_handles.remove(name)
+                positions[name] = None
+
+            else:
+                # since we use minimap mode for our adj, we only want the "normal" observations for our obs
+                if name in blue_team:
+                    action_dict[name] = model_enemy.predict(obs[name][:, :, [0, 1, 2, 4, 5]], deterministic=True)[0]
+                    # # blue_model(observation(obs[name]), blue_adjacencies[name], 1).argmax(1).item()  # 0 #env.action_space(name).sample() #
+                else:
+                    if np.random.rand() < 0.1:
+                        action_dict[name] = env.action_space(name).sample()
+                    else:
+                        with torch.no_grad():
+                            action_dict[name] = model(observation(obs[name]), adjacencies[name], 1).argmax(1).item()
+
+                if name in obs:
+                    positions[name] = (round(obs[name][0, 0, -2] * map_size), round(obs[name][0, 0, -1] * map_size))
+                else:
+                    positions[name] = None
 
 
+        adjacencies = get_adjacency(positions)
+        next_obs, rewards, dones, infos = env.step(action_dict)
+        env.render()
+        n_red_rewards = 0
+        red_rewards = 0
+        for name in red_team:
+            if name in rewards:
+                n_red_rewards += 1
+                red_rewards += rewards[name]
 
+        cur_rewards.append(red_rewards / n_red_rewards)
 
-# obs channels (battle):
-# index | obs channel content
-# ---------------------------
-#   0   | obstacle/off the map
-#   1   | my_team_presence
-#   2   | my_team_hp
-#   3   | other_team_presence
-#   4   | other_team_hp
-
-# model = DQN.load("dqn_policy", device="cpu")
-
+    print(np.mean(cur_rewards))
 
 def train_model(model, model_t, enemy_model):
     """
@@ -228,9 +248,6 @@ def train_model(model, model_t, enemy_model):
 
             obs = next_obs
 
-
-            # env.render()
-
             if e < e_before_train:
                 continue
             if k % 8 != 0:
@@ -279,9 +296,6 @@ def train_model(model, model_t, enemy_model):
             actions = torch.tensor(np.concatenate(actions, axis=0)).long()
             done = torch.tensor(np.concatenate(done, axis=0)).long()
 
-            # print("states", states.shape, "new_states", new_states.shape)
-            # print("adj", adj.shape)
-            # print("reward", reward.shape, "actions", actions.shape, "dones", done.shape)
 
             q_values = model(states, adj, n_agents=states.shape[0])
 
@@ -301,6 +315,7 @@ def train_model(model, model_t, enemy_model):
         reward_to_plot.append(mean_reward)
         print(f"episode {e} mean reward {mean_reward}, buf count {buffer.count()}, eps {exploration_eps}", flush=True)
 
+        # after 50 episodes, update the target model
         if e % 50 == 0:
             with torch.no_grad():
                 for p, p_t in zip(model.parameters(), model_t.parameters()):
@@ -308,79 +323,127 @@ def train_model(model, model_t, enemy_model):
                     p_t.data.add_(1 * p.data)
 
 
-        if e % 100 == 0:
-            torch.save(model.state_dict(), "model_state.zip")
-            plt.clf()
-            plt.plot(reward_to_plot)
-            plt.savefig("mean_rewards_" + run_name + ".png")
-
-            plt.clf()
-            plt.plot(losses)
-            plt.savefig("loss/loss_" + run_name + ".png")
+    print("Saving the model to model/" + env_name + "model_state.zip.")
+    torch.save(model.state_dict(), "models/" + env_name + "model_state.zip")
+    print("Plotting rewards and losses!")
+    plt.clf()
+    plt.plot(reward_to_plot)
+    plt.savefig("mean_rewards_" + run_name + ".png")
+    plt.clf()
+    plt.plot(losses)
+    plt.savefig("loss/loss_" + run_name + ".png")
 
     buffer.erase()
 
     return reward_to_plot
 
-
-all_rewards = []
-
-seeds = [1] # [1,2,3,4,5] # 1
-
-for seed in seeds:
-    use_att = True
-    emb_dim = 256
-    max_cycles = 150
-    map_size = 30
-    receptive_field = 6
-    n_episodes = 1201
-    e_before_train = 200
-    e_before_eps_anneal = 150
-    batch_size = 16
-    feature_size = 13 * 13 * 3
-    GAMMA = 0.9
-    lr = 0.0002
-    exploration_eps = 0.9
-    eps_anneal_factor = 0.994
-    max_neighbors = 5
-    # smoothing for updating target model
-    tau = 0.95
-    n_actions = 21
-    run_name = str(seed)
-
-    env = battle_v3.parallel_env(map_size=map_size, minimap_mode=True, max_cycles=max_cycles, extra_features=False,
-                                 attack_opponent_reward=5, dead_penalty=-2, attack_penalty=-0.01)
+# obs channels (battle):
+# index | obs channel content
+# ---------------------------
+#   0   | obstacle/off the map
+#   1   | my_team_presence
+#   2   | my_team_hp
+#   3   | other_team_presence
+#   4   | other_team_hp
 
 
-    env.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+if __name__ == '__main__':
 
-    obs = env.reset()
-    n_red, n_blue = env.team_sizes
-    handles = env.agents
-    agents = np.array(env.agents)
-    original_handles = np.copy(handles)
-    red_index = np.arange(0, n_red)
-    blue_index = np.arange(n_red, n_red + n_blue)
+    from config import battle_config, battlefield_config
 
-    red_team = agents[red_index]
-    blue_team = agents[blue_index]
+    parser = argparse.ArgumentParser(description="Execute or train a model on one of the battle MAgent environments" + \
+                                     " Hyperparameters are provided via the config.py file!.")
+    parser.add_argument("-env", metavar="E", type=str, help="The MAgent environment to train for. Choose from " + \
+                                                            "[battle battlefield]. Default: battle",
+                        default="battle")
+    parser.add_argument('-show', dest='show', action='store_const',
+                    const=True, default=False,help='If True, execute a show match (with rendering activated).')
+    parser.add_argument("-seed", metavar="S", type=int, help="Seed for the current experiment. Default: 1",
+                        default=1)
 
-    model = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
-    model = model.float()
-    model_t = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+    args = parser.parse_args()
 
-    blue_model = PPO.load("ppo_policy", device="cpu")
-    # blue_model = load_torch_model(DGN(n_red, feature_size, emb_dim, 21, use_att=use_att), "model_state_1.zip")
-    rewards = train_model(model, model_t, blue_model)
+    print("Starting the RL experiment!")
+
+    env_name = args.env.lower()
+
+    if env_name == 'battle':
+        config = battle_config
+        map_size, max_cycles = config['map_size'], config['max_cycles']
+        env = battle_v3.parallel_env(map_size=map_size, minimap_mode=True, max_cycles=max_cycles, extra_features=False,
+                                     attack_opponent_reward=5, dead_penalty=-2, attack_penalty=-0.01)
+    elif env_name == 'battlefield':
+        config = battlefield_config
+        map_size, max_cycles = config['map_size'], config['max_cycles']
+        env = battlefield_v3.parallel_env(map_size=map_size, minimap_mode=True, max_cycles=max_cycles, extra_features=False,
+                                     attack_opponent_reward=5, dead_penalty=-2, attack_penalty=-0.01)
+    else:
+        raise ValueError("Please enter one of the allowed enviroments. Choose from [battle battlefield].")
+
+    all_rewards = []
+
+    seeds = [1,2,3,4,5] # 1
 
 
-    with open("rewards/" + run_name, 'wb') as fp:
-        pickle.dump(rewards, fp)
+    print(f"Running the enviroment {env_name}.")
+    print("Hyperparams follow:")
+    print(config)
+
+    seed = args.seed
+
+    for seed in seeds:
+
+        use_att = config["use_att"]
+        emb_dim = config["emb_dim"]
+        receptive_field = config["receptive_field"]
+        max_neighbors = config["max_neighbors"]
+        n_actions = config["n_actions"]
+
+        n_episodes = config["n_episodes"]
+        e_before_train = config["e_before_train"]
+        e_before_eps_anneal = config["e_before_eps_anneal"]
+        exploration_eps = config["exploration_eps"]
+        eps_anneal_factor = config["eps_anneal_factor"]
+        batch_size = config["batch_size"]
+        feature_size = config["feature_size"]
+        GAMMA = config["GAMMA"]
+        lr = config["lr"]
+
+        run_name = env_name + "_" + str(seed)
+
+        env.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        obs = env.reset()
+        n_red, n_blue = env.team_sizes
+        handles = env.agents
+        agents = np.array(env.agents)
+        original_handles = np.copy(handles)
+        red_index = np.arange(0, n_red)
+        blue_index = np.arange(n_red, n_red + n_blue)
+
+        red_team = agents[red_index]
+        blue_team = agents[blue_index]
+
+        if args.show:
+            print("With show being True, we will execute one show match!")
+            red_model = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+            red_model = load_torch_model(red_model, "models/" + env_name + "_model_state.zip")
+            blue_model = PPO.load("models/" + env_name + "_ppo_policy", device="cpu")
+            show_match(red_model, blue_model)
+            exit()
 
 
-# all_rewards.append(rewards)
+        model = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+        model = model.float()
+        model_t = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+
+        blue_model = PPO.load("models/" + env_name + "_ppo_policy", device="cpu")
+        # blue_model = load_torch_model(DGN(n_red, feature_size, emb_dim, 21, use_att=use_att), "model_state_1.zip")
+        rewards = train_model(model, model_t, blue_model)
 
 
-# plot_rewards(all_rewards, "tmp")
+        with open("rewards/" + run_name, 'wb') as fp:
+            pickle.dump(rewards, fp)
+
