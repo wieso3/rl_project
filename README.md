@@ -1,7 +1,7 @@
 # RL Project: Graph Convolutional Reinforcement Learning
 
 # Installation Guide
-NOTE: Work on this was done on a machine running openSUSE Linux. GPU acceleration was used for training baseline policies. Everything else was done on CPU. The enviroments used are only available on Linux! 
+NOTE: Work on this was done on a machine running openSUSE Linux. GPU acceleration was used for training baseline policies. Everything else was done on CPU. The enviroments used are only officially supported on Linux! 
 
 Clone this repository first. Using a package manager like anaconda, create a new environment.
 ```
@@ -18,7 +18,7 @@ Experiments can be run, by simply running one of the files **battle.py** or **ga
 ```
  python battle.py -h 
 ```
-for displaying help messages.
+for displaying help messages. Also note, that changing of some hyperparameters may need to be done in **config.py**.
 
 
 # What is where?
@@ -28,7 +28,7 @@ Training procedures have been implemented for three MAgent environments. More in
 It is possible to run (and render) show matches by providing the **-show** option, but atleast for me I could not reproduce trained model behavior consistently, despite saving the entire state dictionary. Due to lack of time I also was only able to provide state dictionaries for battle_v3 with attention.
 
 
-After that my standard procedure was to do a few training runs. The rewards get dumped to the rewards folder. By running the **utils.py** file, all rewards currently dumped in the rewards folder will be plotted in a graph.
+After that my standard procedure was to do a few training runs. The rewards get dumped to the 'rewards' folder. By running the **utils.py** file, all rewards currently dumped in the rewards folder will be plotted in a graph. See also *dumped_rewards.png*.
 ## battle
 
 Here agents compete in two teams. They are rewarded for attacking the enemy team and receive negative rewards when standing around or attacking wrong targets. Access this via:
