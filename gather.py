@@ -136,7 +136,7 @@ def train_model(model, model_t):
     Returns:
         rewards: list of mean rewards per episode
     """
-    buffer = ReplayBuffer(buffer_size=7500)
+    buffer = ReplayBuffer(buffer_size=2500)
     global exploration_eps
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -281,8 +281,8 @@ def train_model(model, model_t):
         reward_to_plot.append(mean_reward)
         print(f"episode {e} mean reward {mean_reward}, buf count {buffer.count()}, eps {exploration_eps}", flush=True)
 
-        # after 50 episodes, update the target model
-        if e % 50 == 0:
+        # after 20 episodes, update the target model
+        if e % 20 == 0:
             with torch.no_grad():
                 for p, p_t in zip(model.parameters(), model_t.parameters()):
                     p_t.data.mul_(0)

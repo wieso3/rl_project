@@ -37,7 +37,6 @@ def plot_from_dumps(names, plot_name):
         with open("rewards/" + name, 'rb') as fp:
             reward_list = pickle.load(fp)
             rewards.append(reward_list)
-
     plot_rewards(rewards, plot_name)
 
 
@@ -56,17 +55,23 @@ def plot_rewards(rewards, name, running_average_smoothing=True):
     n_runs = len(rewards)
     plt.clf()
 
-    x = [i for i in range(len(rewards[0]))]
+
+    min_len = min([len(a) for a in rewards])
+    x = [i for i in range(min_len)]
+
+    for i, r in enumerate(rewards):
+        rewards[i] = r[:min_len]
 
     if n_runs > 1:
 
         mean = np.mean(rewards, axis=0)
         std = np.std(rewards, axis=0)
 
+
         # running average smoothing for less noisy graphs
         if running_average_smoothing:
             kernel = np.ones(n_runs) / n_runs
-            mean = np.convolve(mean, kernel, mode='same')
+            mean = np.convolve(mean, kernel, mode='same') # [:-1]
             std = np.convolve(std, kernel, mode='same')
 
         plt.plot(mean, label=r'$\mu$', color='r')
@@ -81,7 +86,6 @@ def plot_rewards(rewards, name, running_average_smoothing=True):
     plt.title(f"Mean rewards from {n_runs} runs")
     plt.ylabel("mean rewards")
     plt.xlabel("episodes")
-    # plt.xticks(y)
     plt.legend()
     plt.savefig(name + ".png")
 
@@ -137,7 +141,6 @@ class ReplayBuffer(object):
         Returns:
             batch: a batch of the desired size
         """
-        # Randomly sample batch_size examples
         if self.num_experiences < batch_size:
             return random.sample(self.buffer, self.num_experiences)
         else:

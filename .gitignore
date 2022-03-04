@@ -1,10 +1,7 @@
-*.zip
 .idea/
 slurmlogs/
 keep/
-rewards/
 loss/
-*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

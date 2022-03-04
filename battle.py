@@ -2,7 +2,7 @@ import torch
 from pettingzoo.magent import battle_v3, battlefield_v3
 import numpy as np
 from models.DGN import DGN
-from utils import ReplayBuffer, observation, plot_rewards, load_torch_model
+from utils import ReplayBuffer, observation, load_torch_model
 import matplotlib.pyplot as plt
 import pickle
 from stable_baselines3 import PPO
@@ -111,7 +111,6 @@ def show_match(model, model_enemy):
                 # since we use minimap mode for our adj, we only want the "normal" observations for our obs
                 if name in blue_team:
                     action_dict[name] = model_enemy.predict(obs[name][:, :, [0, 1, 2, 4, 5]], deterministic=True)[0]
-                    # # blue_model(observation(obs[name]), blue_adjacencies[name], 1).argmax(1).item()  # 0 #env.action_space(name).sample() #
                 else:
                     if np.random.rand() < 0.1:
                         action_dict[name] = env.action_space(name).sample()
@@ -323,8 +322,8 @@ def train_model(model, model_t, enemy_model):
                     p_t.data.add_(1 * p.data)
 
 
-    print("Saving the model to model/" + env_name + "model_state.zip.")
-    torch.save(model.state_dict(), "models/" + env_name + "model_state.zip")
+    print("Saving the model to model/" + env_name + "_model_state.zip.")
+    torch.save(model.state_dict(), "models/" + env_name + "_model_state.zip")
     print("Plotting rewards and losses!")
     plt.clf()
     plt.plot(reward_to_plot)
@@ -380,70 +379,63 @@ if __name__ == '__main__':
     else:
         raise ValueError("Please enter one of the allowed enviroments. Choose from [battle battlefield].")
 
-    all_rewards = []
-
-    seeds = [1,2,3,4,5] # 1
-
-
     print(f"Running the enviroment {env_name}.")
     print("Hyperparams follow:")
     print(config)
 
     seed = args.seed
 
-    for seed in seeds:
+    use_att = config["use_att"]
+    emb_dim = config["emb_dim"]
+    receptive_field = config["receptive_field"]
+    max_neighbors = config["max_neighbors"]
+    n_actions = config["n_actions"]
 
-        use_att = config["use_att"]
-        emb_dim = config["emb_dim"]
-        receptive_field = config["receptive_field"]
-        max_neighbors = config["max_neighbors"]
-        n_actions = config["n_actions"]
+    n_episodes = config["n_episodes"]
+    e_before_train = config["e_before_train"]
+    e_before_eps_anneal = config["e_before_eps_anneal"]
+    exploration_eps = config["exploration_eps"]
+    eps_anneal_factor = config["eps_anneal_factor"]
+    batch_size = config["batch_size"]
+    feature_size = config["feature_size"]
+    GAMMA = config["GAMMA"]
+    lr = config["lr"]
 
-        n_episodes = config["n_episodes"]
-        e_before_train = config["e_before_train"]
-        e_before_eps_anneal = config["e_before_eps_anneal"]
-        exploration_eps = config["exploration_eps"]
-        eps_anneal_factor = config["eps_anneal_factor"]
-        batch_size = config["batch_size"]
-        feature_size = config["feature_size"]
-        GAMMA = config["GAMMA"]
-        lr = config["lr"]
+    run_name = env_name + "_" + str(seed)
 
-        run_name = env_name + "_" + str(seed)
+    env.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-        env.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+    obs = env.reset()
+    n_red, n_blue = env.team_sizes
+    handles = env.agents
+    agents = np.array(env.agents)
+    original_handles = np.copy(handles)
+    red_index = np.arange(0, n_red)
+    blue_index = np.arange(n_red, n_red + n_blue)
 
-        obs = env.reset()
-        n_red, n_blue = env.team_sizes
-        handles = env.agents
-        agents = np.array(env.agents)
-        original_handles = np.copy(handles)
-        red_index = np.arange(0, n_red)
-        blue_index = np.arange(n_red, n_red + n_blue)
+    red_team = agents[red_index]
+    blue_team = agents[blue_index]
 
-        red_team = agents[red_index]
-        blue_team = agents[blue_index]
-
-        if args.show:
-            print("With show being True, we will execute one show match!")
-            red_model = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
-            red_model = load_torch_model(red_model, "models/" + env_name + "_model_state.zip")
-            blue_model = PPO.load("models/" + env_name + "_ppo_policy", device="cpu")
-            show_match(red_model, blue_model)
-            exit()
-
-
-        model = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
-        model = model.float()
-        model_t = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
-
+    if args.show:
+        print("With show being True, we will execute one show match!")
+        red_model = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+        red_model = load_torch_model(red_model, "models/" + env_name + "_model_state.zip")
         blue_model = PPO.load("models/" + env_name + "_ppo_policy", device="cpu")
-        # blue_model = load_torch_model(DGN(n_red, feature_size, emb_dim, 21, use_att=use_att), "model_state_1.zip")
-        rewards = train_model(model, model_t, blue_model)
+        show_match(red_model, blue_model)
+        exit()
 
 
-        with open("rewards/" + run_name, 'wb') as fp:
-            pickle.dump(rewards, fp)
+    model = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+    model = model.float()
+    model_t = DGN(n_red, feature_size, emb_dim, n_actions, use_att=use_att)
+
+    blue_model = PPO.load("models/" + env_name + "_ppo_policy", device="cpu")
+    # blue_model = load_torch_model(DGN(n_red, feature_size, emb_dim, 21, use_att=use_att), "model_state_1.zip")
+    rewards = train_model(model, model_t, blue_model)
+
+
+    with open("rewards/" + run_name, 'wb') as fp:
+        pickle.dump(rewards, fp)
 

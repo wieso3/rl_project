@@ -40,7 +40,7 @@ battle_config = {
     "n_actions" : 21,
 
     "n_episodes" : 1200,
-    "e_before_train" : 200,
+    "e_before_train" : 1,
     "e_before_eps_anneal" : 150,
     "eps_anneal_factor" : 0.994,
     "exploration_eps" : 0.9,
@@ -83,20 +83,20 @@ gather_config = {
     "use_att" : True,
     "emb_dim" : 256,
     "receptive_field" : 6,
-    "max_neighbors" : 5,
+    "max_neighbors" : 4,
 
     "max_cycles" : 150,
     "n_actions" : 33,
 
-    "n_episodes" : 1201,
-    "e_before_train" : 200,
-    "e_before_eps_anneal" : 150,
+    "n_episodes" : 400,
+    "e_before_train" : 10,
+    "e_before_eps_anneal" : 7,
     "eps_anneal_factor" : 0.994,
     "exploration_eps" : 0.9,
 
     "batch_size" : 16,
     "feature_size" : 15 * 15 * 3,
     "GAMMA" : 0.9,
-    "lr" : 0.0002,
+    "lr" : 0.005,
     "tau" : 0.95
 }

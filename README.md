@@ -25,7 +25,7 @@ for displaying help messages.
 
 Training procedures have been implemented for three MAgent environments. More information on these can be found on the official website at https://www.pettingzoo.ml/magent.
 
-I suggest running a few show matches to get a feel of what has been trained with the **-show** option.
+It is possible to run (and render) show matches by providing the **-show** option, but atleast for me I could not reproduce trained model behavior consistently, despite saving the entire state dictionary. Due to lack of time I also was only able to provide state dictionaries for battle_v3 with attention.
 
 
 After that my standard procedure was to do a few training runs. The rewards get dumped to the rewards folder. By running the **utils.py** file, all rewards currently dumped in the rewards folder will be plotted in a graph.
